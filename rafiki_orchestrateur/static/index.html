@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rafiki V1</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="chat-panel" aria-label="Conversation Rafiki">
+      <header class="topbar">
+        <div class="brand">
+          <div class="face" aria-hidden="true">
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <h1>Rafiki</h1>
+            <p id="runtimeState">Initialisation...</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="refreshStatusBtn" class="icon-btn" title="Actualiser l'etat" aria-label="Actualiser l'etat">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-14.5-4.9L4 8m0 0V3m0 5h5M4 13a8.1 8.1 0 0 0 14.5 4.9L20 16m0 0v5m0-5h-5"/></svg>
+          </button>
+          <button id="resetBtn" class="icon-btn" title="Nouvelle conversation" aria-label="Nouvelle conversation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-1 5v6M9 11v6M5 6l1 15h12l1-15"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="messages" class="messages" aria-live="polite">
+        <article class="message assistant">
+          <div class="bubble">Bonjour, je suis pret. On peut parler, apprendre, ou verifier mon corps Wokwi.</div>
+        </article>
+      </div>
+
+      <form id="chatForm" class="composer">
+        <button id="micBtn" type="button" class="icon-btn mic" title="Parler" aria-label="Parler">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm7-3a7 7 0 0 1-14 0M12 18v3m-4 0h8"/></svg>
+        </button>
+        <textarea id="messageInput" rows="1" placeholder="Ecris a Rafiki..." autocomplete="off"></textarea>
+        <button id="speakToggle" type="button" class="icon-btn active" title="Lecture vocale" aria-label="Lecture vocale">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Zm13-1a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12"/></svg>
+        </button>
+        <button type="submit" class="send-btn">Envoyer</button>
+      </form>
+    </section>
+
+    <aside class="side-panel" aria-label="Suivi Rafiki">
+      <section class="status-block">
+        <h2>Etat</h2>
+        <dl>
+          <div><dt>LLM</dt><dd id="llmStatus">...</dd></div>
+          <div><dt>Corps</dt><dd id="bodyStatus">...</dd></div>
+          <div><dt>Source</dt><dd id="lastSource">local</dd></div>
+          <div><dt>Mode</dt><dd id="liveStatus">live</dd></div>
+        </dl>
+      </section>
+
+      <section class="status-block">
+        <h2>Live</h2>
+        <label class="toggle-row">
+          <input id="liveBodyToggle" type="checkbox" checked>
+          <span>Feedback corps</span>
+        </label>
+        <label class="range-row" for="voiceRate">
+          <span>Vitesse voix</span>
+          <output id="voiceRateValue">0.95</output>
+        </label>
+        <input id="voiceRate" class="range" type="range" min="0.75" max="1.2" step="0.05" value="0.95">
+        <label class="range-row" for="voicePitch">
+          <span>Tonalite</span>
+          <output id="voicePitchValue">1.05</output>
+        </label>
+        <input id="voicePitch" class="range" type="range" min="0.85" max="1.25" step="0.05" value="1.05">
+        <div id="audioStatus" class="text-box">Micro pret si le navigateur le permet.</div>
+      </section>
+
+      <section class="status-block">
+        <h2>Profil</h2>
+        <div id="profileBox" class="text-box">Chargement...</div>
+      </section>
+
+      <section class="status-block grow">
+        <h2>Parent</h2>
+        <div id="parentBox" class="event-list">Chargement...</div>
+      </section>
+    </aside>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

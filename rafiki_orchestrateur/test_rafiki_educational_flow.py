@@ -61,7 +61,7 @@ async def main() -> None:
     assert "parent" in response.lower()
     assert "Amani" in response or "calcul" in response or "répondu" in response
 
-    print("\nOK - Flux éducatif enfant/LLM/corps validé.")
+    print("\nOK - Flux educatif enfant/serveur/tools valide.")
 
 
 if __name__ == "__main__":

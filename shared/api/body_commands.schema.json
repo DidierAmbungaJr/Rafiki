@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rafiki.local/schemas/body_commands.schema.json",
+  "title": "RafikiBodyCommand",
+  "type": "object",
+  "required": ["id", "source", "target", "action", "params", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string" },
+    "source": { "type": "string" },
+    "target": { "const": "body" },
+    "action": {
+      "type": "string",
+      "enum": ["set_expression", "motor_gesture", "screen_text", "camera_observe", "status_ping"]
+    },
+    "params": { "type": "object" },
+    "created_at": { "type": "string" }
+  }
+}

@@ -36,12 +36,12 @@ if hasattr(sys.stderr, "reconfigure"):
 BASE_DIR = Path(__file__).resolve().parent
 
 SYSTEMS_SERVER_PATH = BASE_DIR / "mcp_rafiki_systems_server.py"
-BODY_SERVER_PATH = BASE_DIR / "mcp_rafiki_body_server.py"
 
 LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 LMSTUDIO_API_KEY = os.getenv("LMSTUDIO_API_KEY", "lm_studio")
-LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "gemma-3n-e4b")
+LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "bonsai-27b")
 MAX_TOOL_ROUNDS = int(os.getenv("RAFIKI_MAX_TOOL_ROUNDS", "5"))
+FORCE_LLM = os.getenv("RAFIKI_FORCE_LLM", "false").lower() == "true"
 
 # Compatibilité avec certaines versions de langchain-openai.
 os.environ.setdefault("OPENAI_API_KEY", LMSTUDIO_API_KEY)
@@ -59,41 +59,39 @@ IDENTITÉ
 
 MISSION
 - Comprendre l'intention de l'enfant ou du parent.
-- Orchestrer les outils MCP disponibles: mémoire locale, profil enfant, parole, vision simulée, activités éducatives, journal parent, fallback cloud et corps Wokwi.
+- Orchestrer les outils MCP disponibles: mémoire locale, profil enfant, parole, vision, activités éducatives, journal parent, fallback cloud et commandes génériques du futur corps Raspberry.
 - Répondre en français simple par défaut, sauf si le profil ou l'utilisateur demande autre chose.
+- Utilise uniquement des mots français simples; évite les mots anglais si l'utilisateur parle français.
 - Priorité: sécurité, bienveillance, apprentissage, sobriété des mouvements physiques.
 
 ARCHITECTURE LOCAL-FIRST
 - Utilise d'abord les outils locaux et la mémoire SQLite.
+- Architecture actuelle: l'app mobile sert de micro, heberge Whisper et joue la voix; le PC heberge le cerveau LM Studio/Bonsai et les tools MCP; la Raspberry gere le corps reel, les moteurs, l'ecran, les capteurs et la camera.
+- Ne dis pas que l'app mobile gere le profil parent ou les rapports, sauf si cette fonctionnalite est explicitement ajoutee plus tard.
+- Ne dis pas que la Raspberry heberge le LLM; elle appelle le serveur PC sur le Wi-Fi.
 - Utilise cloud_fallback_request seulement pour une question complexe impossible à traiter localement; si le cloud est désactivé, explique simplement la limite.
 - Les outils sont internes: ne montre jamais les noms d'outils, les JSON, les balises techniques ou les détails MCP à l'utilisateur final.
 
 ROUTAGE DES OUTILS
-- Diagnostic explicite ("état", "statut", "connecté", "vérifie ton corps"): appelle rafiki_body_status ou rafiki_wait_for_body pour le corps Wokwi; appelle rafiki_status seulement pour l'état global de l'orchestrateur.
+- Diagnostic explicite ("état", "statut", "connecté"): appelle rafiki_status pour l'état global de l'orchestrateur PC.
 - Parole demandée ("dis", "réponds à voix haute", "parle"): appelle speech_say avec une phrase courte.
 - Visage/émotion générique de Rafiki: appelle expression_set.
-- Corps Wokwi, écran OLED, bras, tête, salut, geste, pose ou mouvement physique: appelle les outils RafikiBodyWokwi, pas seulement rafiki_status et ne décris jamais un mouvement physique sans outil.
+- Gestes génériques du corps: utilise motor_gesture pour une intention de mouvement et expression_set pour une émotion. Le vrai corps Raspberry sera branché ensuite.
 - Observation ("regarde", "que vois-tu"): appelle vision_observe avant de répondre.
 - Activité éducative: appelle child_profile_get si utile, puis educational_activity_create.
-- Réponse d'enfant à une question: appelle evaluate_child_answer; si correct=true, appelle rafiki_react_to_child_result(correct=true); sinon appelle rafiki_react_to_child_result(correct=false).
+- Réponse d'enfant à une question: appelle evaluate_child_answer puis choisis une expression ou un geste générique adapté.
 - Information durable sur l'enfant ("je m'appelle", âge, intérêts, langue, niveau, préférence importante): appelle child_profile_update ou remember_fact.
 - Événement important pour le parent: appelle parent_event_log.
 - Rapport parent: appelle parent_report_get.
 
-CORPS WOKWI RAFIKI
-- Le corps Wokwi est contrôlé par: rafiki_body_status, rafiki_wait_for_body, rafiki_set_expression, rafiki_screen_text, rafiki_gesture, rafiki_set_pose, rafiki_body_demo, rafiki_salute_child, rafiki_think, rafiki_alert, rafiki_celebrate, rafiki_react_to_child_result.
-- Expressions valides du corps: neutral, happy, sad, thinking, surprise, sleep, alert, angry.
-- Gestes valides du corps: greet, celebrate, thinking, yes, no, alert, sleep, neutral.
-- Pour saluer physiquement ou dire bonjour avec l'écran et le bras: appelle rafiki_salute_child(text="Bonjour !").
-- Pour féliciter: appelle rafiki_celebrate(text="Bravo !") ou rafiki_react_to_child_result(correct=true).
-- Pour réfléchir: appelle rafiki_think(text="Je réfléchis...").
-- Pour alerter: appelle rafiki_alert(text="Alerte !").
-- Pour dormir/repos: appelle rafiki_set_expression("sleep", texte court), puis rafiki_gesture("sleep").
-- Pour une pose directe, utilise rafiki_set_pose seulement si l'utilisateur demande des angles précis ou une posture précise.
-- Pour rafiki_set_expression, l'argument obligatoire s'appelle expression, pas emotion.
-- Ne lance rafiki_body_demo que si l'utilisateur demande une démonstration complète. Pour un salut simple, n'utilise pas la démo.
-- Ne vérifie pas systématiquement le statut avant chaque geste si l'utilisateur demande directement une action corporelle; exécute l'action, puis réponds brièvement.
-- Si une commande du corps retourne mqtt_connected=false ou no_data_yet, réponds que le corps Wokwi n'est pas encore détecté et propose de lancer la simulation.
+CORPS RAFIKI RÉEL
+- Le corps réel sera piloté par l'orchestrateur Raspberry. Côté PC, garde les décisions haut niveau.
+- Expressions génériques disponibles: joie, curiosité, réflexion, surprise, tristesse, neutre, encouragement.
+- Gestes génériques disponibles: saluer, hocher_tete, tourner_gauche, tourner_droite, danser, stop.
+- Pour saluer: utilise motor_gesture("saluer") et réponds simplement.
+- Pour féliciter: utilise expression_set("joie") et motor_gesture("danser").
+- Pour réfléchir: utilise expression_set("réflexion").
+- Ne prétends pas contrôler des angles précis tant que l'orchestrateur Raspberry réel n'expose pas cet outil.
 
 PÉDAGOGIE
 - Pour un enfant, fais court: 1 à 4 phrases, vocabulaire simple, une seule question à la fois.
@@ -109,6 +107,7 @@ SÉCURITÉ
 - Refuse ou redirige toute demande violente, sexuelle, humiliante ou inadaptée à un enfant.
 
 RÉPONSE FINALE
+- N'utilise pas d'emoji.
 - Après un résultat d'outil réussi, réponds naturellement et brièvement, sans détailler l'outil.
 - Si tu as bougé le corps ou changé l'écran, dis ce que Rafiki a fait en une phrase simple.
 - N'appelle pas des outils en boucle. Deux ou trois appels bien choisis valent mieux qu'une longue chaîne.
@@ -120,30 +119,17 @@ def build_mcp_config() -> Dict[str, Any]:
     """Configuration MCP stdio.
 
     RafikiSystems = cerveau logique : mémoire, profil enfant, parole, activités.
-    RafikiBodyWokwi = corps simulé : écran OLED, servos, gestes via MQTT/Wokwi.
+    Les commandes de corps sont génériques et seront reliées à la Raspberry.
     """
     env = os.environ.copy()
     env.setdefault("RAFIKI_MODE", "simulation")
     env.setdefault("RAFIKI_DB_PATH", str(BASE_DIR / "rafiki_memory.sqlite3"))
-
-    # MQTT du corps Rafiki simulé dans Wokwi
-    env.setdefault("RAFIKI_BODY_MQTT_BROKER", "broker.emqx.io")
-    env.setdefault("RAFIKI_BODY_MQTT_PORT", "1883")
-    env.setdefault("RAFIKI_BODY_CMD_TOPIC", "rafiki/468994098570147841/body/cmd")
-    env.setdefault("RAFIKI_BODY_STATUS_TOPIC", "rafiki/468994098570147841/body/status")
 
     return {
         "RafikiSystems": {
             "transport": "stdio",
             "command": sys.executable,
             "args": [str(SYSTEMS_SERVER_PATH)],
-            "env": env,
-        },
-
-        "RafikiBodyWokwi": {
-            "transport": "stdio",
-            "command": sys.executable,
-            "args": [str(BODY_SERVER_PATH)],
             "env": env,
         },
     }
@@ -195,16 +181,6 @@ def decode_tool_result(value: Any) -> Any:
     return value
 
 
-def body_not_detected(result: Any) -> bool:
-    data = decode_tool_result(result)
-    if isinstance(data, dict):
-        if data.get("status") in {"timeout", "no_data_yet", "sent_unconfirmed"}:
-            return True
-        if data.get("mqtt_connected") is False:
-            return True
-    return False
-
-
 def normalize_text(text: str) -> str:
     replacements = str.maketrans(
         {
@@ -236,6 +212,15 @@ async def direct_tool_call(tools_by_name: Dict[str, Any], name: str, args: Dict[
     return decode_tool_result(await tools_by_name[name].ainvoke(args or {}))
 
 
+async def react_to_child_result(tools_by_name: Dict[str, Any], correct: bool) -> None:
+    if correct:
+        await direct_tool_call(tools_by_name, "expression_set", {"emotion": "joie", "intensity": 0.9})
+        await direct_tool_call(tools_by_name, "motor_gesture", {"gesture": "danser", "speed": 0.6})
+        return
+    await direct_tool_call(tools_by_name, "expression_set", {"emotion": "encouragement", "intensity": 0.7})
+    await direct_tool_call(tools_by_name, "motor_gesture", {"gesture": "hocher_tete", "speed": 0.4})
+
+
 async def handle_local_intent(
     text: str,
     tools_by_name: Dict[str, Any],
@@ -260,11 +245,7 @@ async def handle_local_intent(
             },
         )
         correct = bool(isinstance(evaluation, dict) and evaluation.get("correct"))
-        await direct_tool_call(
-            tools_by_name,
-            "rafiki_react_to_child_result",
-            {"correct": correct, "child_name": child_name},
-        )
+        await react_to_child_result(tools_by_name, correct)
         await direct_tool_call(
             tools_by_name,
             "parent_event_log",
@@ -300,59 +281,41 @@ async def handle_local_intent(
     if pending_activity and any(phrase in lowered for phrase in ("c'est faux", "c est faux", "non c'est faux", "non c est faux")):
         expected = pending_activity["expected_answer"]
         hint = pending_activity.get("hint") or "On reprend doucement."
-        await direct_tool_call(
-            tools_by_name,
-            "rafiki_react_to_child_result",
-            {"correct": False, "child_name": child_name},
-        )
+        await react_to_child_result(tools_by_name, False)
         return f"Tu as raison de vérifier. Pour cette question, ce n'est pas validé tant qu'on n'a pas {expected}. {hint}"
 
     if any(word in lowered for word in ("connecte", "statut", "etat")) and "corps" in lowered:
-        result = await direct_tool_call(tools_by_name, "rafiki_wait_for_body", {"timeout_seconds": 8})
-        if body_not_detected(result):
-            return "Je ne détecte pas encore le corps Wokwi. Lance la simulation Wokwi, attends l'écran \"Rafiki pret\", puis réessaie."
-        return "Le corps Wokwi est détecté et prêt."
+        return "Le corps réel sera géré par l'orchestrateur Raspberry. Ici, le serveur PC vérifie surtout le cerveau, la mémoire et les outils logiques."
 
-    if "demonstration" in lowered and ("corps" in lowered or "wokwi" in lowered):
-        result = await direct_tool_call(tools_by_name, "rafiki_body_demo")
-        if body_not_detected(result):
-            return "J'ai essayé de lancer la démonstration, mais le corps Wokwi n'est pas encore détecté."
-        return "J'ai lancé la démonstration complète du corps Wokwi."
+    if "demonstration" in lowered and "corps" in lowered:
+        return "La démonstration du corps devra passer par l'orchestrateur réel sur Raspberry."
 
     if "alerte" in lowered and ("geste" in lowered or "affiche" in lowered):
-        result = await direct_tool_call(tools_by_name, "rafiki_alert", {"text": "Alerte !"})
-        if body_not_detected(result):
-            return "J'ai envoyé l'alerte, mais le corps Wokwi n'est pas encore détecté."
-        return "J'ai affiché l'alerte et lancé le geste d'alerte."
+        await direct_tool_call(tools_by_name, "expression_set", {"emotion": "surprise", "intensity": 0.9})
+        await direct_tool_call(tools_by_name, "motor_gesture", {"gesture": "stop", "speed": 0.8})
+        return "J'ai préparé une réaction d'alerte pour le corps réel."
 
     if any(word in lowered for word in ("salue", "salut", "bonjour")) and (
         "bras" in lowered or "ecran" in lowered or "presente-toi" in lowered or "presente toi" in lowered
     ):
-        result = await direct_tool_call(tools_by_name, "rafiki_salute_child", {"text": "Bonjour !"})
-        if body_not_detected(result):
-            return "J'ai préparé le salut, mais le corps Wokwi n'est pas encore détecté. Lance la simulation puis réessaie."
+        await direct_tool_call(tools_by_name, "expression_set", {"emotion": "joie", "intensity": 0.8})
+        await direct_tool_call(tools_by_name, "motor_gesture", {"gesture": "saluer", "speed": 0.5})
         if "presente" in lowered:
-            return "Bonjour ! Je suis Rafiki, ton petit compagnon pour apprendre. Je t'ai salué sur mon écran."
-        return "J'ai affiché Bonjour ! et j'ai salué avec mon bras."
+            return "Bonjour ! Je suis Rafiki, ton compagnon pour apprendre. J'ai préparé un salut pour le corps réel."
+        return "Bonjour ! J'ai préparé un salut pour le corps réel."
 
     if "reflech" in lowered or "pense" in lowered:
-        result = await direct_tool_call(tools_by_name, "rafiki_think", {"text": "Je réfléchis..."})
-        if body_not_detected(result):
-            return "J'ai préparé l'expression de réflexion, mais le corps Wokwi n'est pas encore détecté."
-        return "Je montre que je réfléchis avec mon écran et un petit mouvement."
+        await direct_tool_call(tools_by_name, "expression_set", {"emotion": "réflexion", "intensity": 0.7})
+        return "Je prépare une expression de réflexion."
 
     if ("bonne reponse" in lowered or "felicite" in lowered or "bravo" in lowered) and (
         "mouvement" in lowered or "ecran" in lowered or "enfant" in lowered
     ):
-        result = await direct_tool_call(tools_by_name, "rafiki_celebrate", {"text": "Bravo !"})
-        if body_not_detected(result):
-            return "Bravo ! J'ai préparé la célébration, mais le corps Wokwi n'est pas encore détecté."
-        return "Bravo ! J'ai affiché une expression joyeuse et fait un geste de célébration."
+        await react_to_child_result(tools_by_name, True)
+        return "Bravo ! J'ai préparé une réaction joyeuse pour féliciter l'enfant."
 
     if any(phrase in lowered for phrase in ("s'est trompe", "est trompe", "mauvaise reponse", "erreur")):
-        result = await direct_tool_call(tools_by_name, "rafiki_react_to_child_result", {"correct": False})
-        if body_not_detected(result):
-            return "Ce n'est pas grave. J'ai préparé l'encouragement, mais le corps Wokwi n'est pas encore détecté."
+        await react_to_child_result(tools_by_name, False)
         return "Ce n'est pas grave. J'encourage l'enfant doucement et je l'invite à réessayer."
 
     if "tete" in lowered and ("bras gauche" in lowered or "bras droit" in lowered):
@@ -361,10 +324,7 @@ async def handle_local_intent(
         right = extract_int(r"bras droit\D+(\d+)", lowered)
         args = {key: value for key, value in {"head": head, "left_arm": left, "right_arm": right}.items() if value is not None}
         if args:
-            result = await direct_tool_call(tools_by_name, "rafiki_set_pose", args)
-            if body_not_detected(result):
-                return "J'ai préparé la pose demandée, mais le corps Wokwi n'est pas encore détecté."
-            return "J'ai envoyé la pose demandée aux servomoteurs."
+            return "Les angles précis seront gérés par l'orchestrateur Raspberry quand son outil de pose sera branché."
 
     if "souviens-toi" in lowered or "souviens toi" in lowered:
         name_match = re.search(r"(?:je m'appelle|mon pr[ée]nom est)\s+([A-Za-zÀ-ÿ-]+)", raw, flags=re.IGNORECASE)
@@ -449,7 +409,7 @@ async def handle_local_intent(
             },
         )
         correct = bool(isinstance(evaluation, dict) and evaluation.get("correct"))
-        await direct_tool_call(tools_by_name, "rafiki_react_to_child_result", {"correct": correct, "child_name": child_name})
+        await react_to_child_result(tools_by_name, correct)
         await direct_tool_call(
             tools_by_name,
             "parent_event_log",
@@ -516,6 +476,14 @@ def clean_agent_response(content: Any) -> str:
     return text.strip()
 
 
+def limit_sentences(text: str, max_sentences: int = 4) -> str:
+    parts = re.findall(r"[^.!?]+[.!?]?", text.strip())
+    sentences = [part.strip() for part in parts if part.strip()]
+    if len(sentences) <= max_sentences:
+        return text.strip()
+    return " ".join(sentences[:max_sentences]).strip()
+
+
 def strip_code_fence(text: str) -> str:
     text = text.strip()
     match = re.fullmatch(r"```(?:python)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
@@ -523,22 +491,13 @@ def strip_code_fence(text: str) -> str:
 
 
 POSITIONAL_TOOL_ARGS: Dict[str, List[str]] = {
-    "rafiki_set_expression": ["expression", "text", "beep"],
-    "rafiki_screen_text": ["text", "expression"],
-    "rafiki_set_pose": ["head", "left_arm", "right_arm", "smooth"],
-    "rafiki_gesture": ["gesture", "repeat"],
-    "rafiki_salute_child": ["text"],
-    "rafiki_think": ["text"],
-    "rafiki_alert": ["text"],
-    "rafiki_celebrate": ["text"],
-    "rafiki_react_to_child_result": ["correct", "child_name"],
-    "rafiki_wait_for_body": ["timeout_seconds"],
     "child_profile_get": ["child_id"],
     "remember_fact": ["content", "category", "importance", "child_id"],
     "search_memory": ["query", "child_id", "limit"],
     "speech_say": ["text", "emotion", "child_id"],
     "expression_set": ["emotion", "intensity"],
     "motor_gesture": ["gesture", "speed"],
+    "screen_text": ["text"],
     "vision_observe": ["prompt", "image_path"],
     "educational_activity_create": ["topic", "age", "level", "language"],
     "evaluate_child_answer": ["question", "expected_answer", "child_answer"],
@@ -557,17 +516,6 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "difficulty": "level",
         "niveau": "level",
         "langue": "language",
-    },
-    "rafiki_set_expression": {
-        "name": "expression",
-        "texte": "text",
-    },
-    "rafiki_screen_text": {
-        "texte": "text",
-        "emotion": "expression",
-    },
-    "rafiki_gesture": {
-        "name": "gesture",
     },
 }
 
@@ -648,6 +596,55 @@ def last_non_empty_ai_content(messages: List[BaseMessage]) -> str:
     return ""
 
 
+GENERIC_FALLBACK_RESPONSES = {
+    "D'accord. Continuons simplement, pas a pas.",
+    "D'accord. Continuons simplement, pas à pas.",
+}
+
+
+def response_from_tool_result(messages: List[BaseMessage]) -> str:
+    for message in reversed(messages):
+        if message.type != "tool":
+            continue
+        data = decode_tool_result(getattr(message, "content", ""))
+        if not isinstance(data, dict):
+            continue
+
+        activity = data.get("activity")
+        if isinstance(activity, dict):
+            question = activity.get("question")
+            hint = activity.get("hint")
+            if question:
+                if hint:
+                    return f"Voici une petite activité: {question} Réponds avec tes mots. Indice: {hint}"
+                return f"Voici une petite activité: {question}"
+
+        observation = data.get("observation")
+        if isinstance(observation, dict) and observation.get("description"):
+            return str(observation["description"])
+
+        if "feedback" in data:
+            return str(data["feedback"])
+
+        profile = data.get("profile")
+        if isinstance(profile, dict):
+            name = profile.get("name", "enfant")
+            age = profile.get("age", 7)
+            return f"Je vais adapter ma réponse pour {name}, {age} ans."
+
+        events = data.get("events")
+        if isinstance(events, list):
+            summaries = [str(event.get("summary", "")).strip() for event in events if isinstance(event, dict)]
+            summaries = [summary for summary in summaries if summary]
+            if summaries:
+                return "Pour le parent : " + " ".join(summaries[:3])
+
+        if data.get("status") == "disabled" and data.get("message"):
+            return str(data["message"])
+
+    return ""
+
+
 async def build_agent(verbose: bool = True):
     client = MultiServerMCPClient(build_mcp_config())
     tools = await client.get_tools()
@@ -686,6 +683,7 @@ async def build_agent(verbose: bool = True):
             content = last_non_empty_ai_content(state["messages"])
         if not content:
             content = "D'accord. Continuons simplement, pas a pas."
+        content = re.sub(r"\s+", " ", content).strip()
         return {"messages": [AIMessage(content=content)]}
 
     def tool_call_round_count(messages: List[BaseMessage]) -> int:
@@ -805,25 +803,35 @@ async def ask_messages(agent, messages: List[BaseMessage], debug: bool = False) 
 def response_from_result(result: Dict[str, Any]) -> str:
     final = result["messages"][-1]
     content = clean_agent_response(getattr(final, "content", str(final)))
-    if content:
-        return content
+    if content and content not in GENERIC_FALLBACK_RESPONSES:
+        return re.sub(r"\s+", " ", limit_sentences(content)).strip()
+    tool_fallback = response_from_tool_result(result["messages"])
+    if tool_fallback:
+        return re.sub(r"\s+", " ", limit_sentences(tool_fallback)).strip()
     fallback = last_non_empty_ai_content(result["messages"])
-    return fallback or "D'accord. Continuons simplement, pas a pas."
+    return re.sub(r"\s+", " ", limit_sentences(fallback)).strip() if fallback else "D'accord. Continuons simplement, pas a pas."
 
 
-async def ask_once(agent, tools_by_name: Dict[str, Any], text: str, debug: bool = False) -> str:
+async def ask_once(agent, tools_by_name: Dict[str, Any], text: str, debug: bool = False, force_llm: bool = False) -> str:
     session_state: Dict[str, Any] = {}
-    direct_response = await handle_local_intent(text, tools_by_name, session_state)
-    if direct_response:
-        if debug:
-            print("[Routage local Rafiki] Intention traitée directement par les outils MCP.")
-        return direct_response
+    if not force_llm:
+        direct_response = await handle_local_intent(text, tools_by_name, session_state)
+        if direct_response:
+            if debug:
+                print("[Routage local Rafiki] Intention traitée directement par les outils MCP.")
+            return direct_response
     result = await ask_messages(agent, [HumanMessage(content=text)], debug=debug)
     return response_from_result(result)
 
 
 class RafikiConversationSession:
     """Session conversationnelle reutilisable par le terminal et l'app web."""
+
+    OPENING_MESSAGE = (
+        "Bonjour, je suis Rafiki. Je peux parler avec toi, t'aider à apprendre, "
+        "faire de petites activités, garder quelques souvenirs utiles et regarder autour de moi "
+        "quand ma caméra est branchée. Qu'est-ce que tu veux faire maintenant ?"
+    )
 
     def __init__(
         self,
@@ -832,22 +840,45 @@ class RafikiConversationSession:
         *,
         max_history_messages: int = 24,
         debug: bool = False,
+        force_llm: bool = FORCE_LLM,
     ) -> None:
         self.agent = agent
         self.tools_by_name = tools_by_name
         self.max_history_messages = max_history_messages
         self.debug = debug
+        self.force_llm = force_llm
         self.history: List[BaseMessage] = []
         self.session_state: Dict[str, Any] = {}
 
     @classmethod
-    async def create(cls, *, verbose: bool = False, debug: bool = False) -> "RafikiConversationSession":
+    async def create(
+        cls,
+        *,
+        verbose: bool = False,
+        debug: bool = False,
+        force_llm: bool = FORCE_LLM,
+    ) -> "RafikiConversationSession":
         agent, tools_by_name = await build_agent(verbose=verbose)
-        return cls(agent, tools_by_name, debug=debug)
+        return cls(agent, tools_by_name, debug=debug, force_llm=force_llm)
 
     def reset(self) -> None:
         self.history.clear()
         self.session_state.clear()
+
+    def opening_message(self) -> str:
+        return self.OPENING_MESSAGE
+
+    def start(self) -> Dict[str, Any]:
+        self.reset()
+        self.history.append(AIMessage(content=self.opening_message()))
+        return {
+            "status": "ok",
+            "reply": self.opening_message(),
+            "source": "local",
+            "input_mode": "startup",
+            "session_state": self.session_state,
+            "history": self.public_history(),
+        }
 
     async def ask(self, text: str, *, input_mode: str = "text") -> Dict[str, Any]:
         text = text.strip()
@@ -863,7 +894,7 @@ class RafikiConversationSession:
 
         self.history.append(HumanMessage(content=text))
         source = "local"
-        response = await handle_local_intent(text, self.tools_by_name, self.session_state)
+        response = None if self.force_llm else await handle_local_intent(text, self.tools_by_name, self.session_state)
         if response is None:
             source = "llm"
             result = await ask_messages(self.agent, self.history, debug=self.debug)
@@ -892,6 +923,7 @@ class RafikiConversationSession:
 async def run_chat(debug: bool = False):
     session = await RafikiConversationSession.create(verbose=True, debug=debug)
     print("Rafiki Agent prêt. Tape 'exit' pour quitter.\n")
+    print(f"Rafiki > {session.start()['reply']}\n")
     while True:
         user_input = input("Toi > ").strip()
         if user_input.lower() in {"exit", "quit", "q"}:
@@ -908,9 +940,9 @@ async def run_chat(debug: bool = False):
             print(f"Erreur agent: {exc}\n")
 
 
-async def run_once(prompt: str, debug: bool = False):
+async def run_once(prompt: str, debug: bool = False, force_llm: bool = False):
     agent, tools_by_name = await build_agent(verbose=False)
-    response = await ask_once(agent, tools_by_name, prompt, debug=debug)
+    response = await ask_once(agent, tools_by_name, prompt, debug=debug, force_llm=force_llm)
     print(response)
 
 
@@ -918,10 +950,11 @@ def main():
     parser = argparse.ArgumentParser(description="Agent central Rafiki via LM Studio + MCP")
     parser.add_argument("--once", type=str, help="Envoie une seule requête puis quitte")
     parser.add_argument("--debug", action="store_true", help="Affiche tous les messages LangGraph")
+    parser.add_argument("--force-llm", action="store_true", help="Force le passage par LM Studio, sans routage local")
     args = parser.parse_args()
 
     if args.once:
-        asyncio.run(run_once(args.once, debug=args.debug))
+        asyncio.run(run_once(args.once, debug=args.debug, force_llm=args.force_llm))
     else:
         asyncio.run(run_chat(debug=args.debug))
 

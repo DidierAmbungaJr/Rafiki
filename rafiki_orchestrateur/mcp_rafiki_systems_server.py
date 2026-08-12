@@ -20,9 +20,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import base64
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -59,6 +63,13 @@ MQTT_TOPIC_STATUS = os.getenv("RAFIKI_MQTT_TOPIC_STATUS", "rafiki/esp32/status")
 CLOUD_ENABLED = os.getenv("RAFIKI_CLOUD_ENABLED", "false").lower() == "true"
 CLOUD_API_URL = os.getenv("RAFIKI_CLOUD_API_URL", "http://127.0.0.1:8000")
 
+LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
+LMSTUDIO_API_KEY = os.getenv("LMSTUDIO_API_KEY", "lm_studio")
+LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "bonsai-27b")
+RAFIKI_VISION_ENABLED = os.getenv("RAFIKI_VISION_ENABLED", "false").lower() == "true"
+RAFIKI_VISION_MODEL = os.getenv("RAFIKI_VISION_MODEL", LMSTUDIO_MODEL)
+RAFIKI_VISION_TIMEOUT_SECONDS = int(os.getenv("RAFIKI_VISION_TIMEOUT_SECONDS", "90"))
+
 _RUNTIME_STATE: Dict[str, Any] = {
     "mode": MODE,
     "mqtt_connected": False,
@@ -69,7 +80,6 @@ _RUNTIME_STATE: Dict[str, Any] = {
     "esp32_status": {},
     "started_at": datetime.now(timezone.utc).isoformat(),
 }
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -119,6 +129,15 @@ def _init_db() -> None:
                 interests_json TEXT NOT NULL DEFAULT '[]',
                 level TEXT NOT NULL DEFAULT 'débutant',
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS body_commands (
+                id TEXT PRIMARY KEY,
+                command_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -191,11 +210,14 @@ def _mqtt_connect_if_needed() -> None:
 
 def _publish_command(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
     command = {
+        "id": uuid.uuid4().hex,
         "source": "rafiki_mcp",
+        "target": "body",
         "action": action,
         "params": params,
         "created_at": _now(),
     }
+    _enqueue_body_command(command)
     _mqtt_connect_if_needed()
     if MQTT_ENABLED and _mqtt_client is not None:
         try:
@@ -204,6 +226,105 @@ def _publish_command(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             logger.warning("Publication MQTT impossible: %s", exc)
     return {"transport": "simulation", "topic": None, "command": command}
+
+
+def _enqueue_body_command(command: Dict[str, Any]) -> None:
+    with _connect_db() as con:
+        con.execute(
+            """
+            INSERT INTO body_commands (id, command_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                str(command["id"]),
+                json.dumps(command, ensure_ascii=False),
+                str(command["created_at"]),
+            ),
+        )
+        con.execute(
+            """
+            DELETE FROM body_commands
+            WHERE id NOT IN (
+                SELECT id FROM body_commands
+                ORDER BY created_at DESC
+                LIMIT 100
+            )
+            """
+        )
+        con.commit()
+
+
+def _body_queue_size() -> int:
+    with _connect_db() as con:
+        return int(con.execute("SELECT COUNT(*) AS n FROM body_commands").fetchone()["n"])
+
+
+def _mime_type_for_image(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
+def _lmstudio_chat(payload: Dict[str, Any], timeout_seconds: int = 120) -> Dict[str, Any]:
+    request = urllib.request.Request(
+        f"{LMSTUDIO_BASE_URL}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {LMSTUDIO_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"LM Studio HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"LM Studio indisponible: {exc.reason}") from exc
+
+
+def _observe_image_with_lmstudio(prompt: str, image_path: Path) -> Dict[str, Any]:
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    image_url = f"data:{_mime_type_for_image(image_path)};base64,{encoded}"
+    payload = {
+        "model": RAFIKI_VISION_MODEL,
+        "temperature": 0.2,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Tu es le module vision de Rafiki. Decris uniquement ce qui est visible, "
+                    "sans inventer. Reponds en francais simple, utile pour un robot educatif."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt or "Que vois-tu ?"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ],
+    }
+    response = _lmstudio_chat(payload, timeout_seconds=RAFIKI_VISION_TIMEOUT_SECONDS)
+    description = (
+        response.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+    if not description:
+        description = "Image recue, mais le modele vision n'a pas produit de description."
+    return {
+        "provider": "lmstudio",
+        "model": RAFIKI_VISION_MODEL,
+        "description": description,
+    }
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -235,6 +356,72 @@ def rafiki_status() -> Dict[str, Any]:
         "esp32_status": _RUNTIME_STATE["esp32_status"],
         "started_at": _RUNTIME_STATE["started_at"],
         "checked_at": _now(),
+    }
+
+
+@mcp.tool(
+    name="body_command_next",
+    description="Retourne et retire la prochaine commande corps en attente pour la Raspberry.",
+)
+def body_command_next() -> Dict[str, Any]:
+    with _connect_db() as con:
+        row = con.execute(
+            """
+            SELECT id, command_json
+            FROM body_commands
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return {"status": "idle", "command": None, "queue_size": 0}
+        con.execute("DELETE FROM body_commands WHERE id = ?", (row["id"],))
+        con.commit()
+
+    command = json.loads(row["command_json"])
+    return {
+        "status": "ok",
+        "command": command,
+        "queue_size": _body_queue_size(),
+    }
+
+
+@mcp.tool(
+    name="body_command_peek",
+    description="Liste les commandes corps en attente sans les retirer.",
+)
+def body_command_peek(limit: int = 10) -> Dict[str, Any]:
+    limit = max(1, min(int(limit), 50))
+    with _connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT command_json
+            FROM body_commands
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return {
+        "status": "ok",
+        "commands": [json.loads(row["command_json"]) for row in rows],
+        "queue_size": _body_queue_size(),
+    }
+
+
+@mcp.tool(
+    name="body_status_update",
+    description="Met a jour le dernier statut connu de la Raspberry ou du controleur Arduino.",
+)
+def body_status_update(status: Dict[str, Any]) -> Dict[str, Any]:
+    _RUNTIME_STATE["esp32_status"] = {
+        **_RUNTIME_STATE.get("esp32_status", {}),
+        **status,
+        "updated_at": _now(),
+    }
+    return {
+        "status": "ok",
+        "body_status": _RUNTIME_STATE["esp32_status"],
     }
 
 
@@ -420,6 +607,18 @@ def motor_gesture(gesture: str, speed: float = 0.5) -> Dict[str, Any]:
 
 
 @mcp.tool(
+    name="screen_text",
+    description="Affiche un texte court sur l'ecran du corps Rafiki via l'orchestrateur Raspberry.",
+)
+def screen_text(text: str) -> Dict[str, Any]:
+    text = " ".join(text.strip().split())[:160]
+    if not text:
+        return {"status": "error", "message": "text est vide"}
+    transport = _publish_command("screen_text", {"text": text})
+    return {"status": "success", "text": text, "transport": transport}
+
+
+@mcp.tool(
     name="vision_observe",
     description="Observe l'environnement. En simulation, renvoie une description fictive; sur Raspberry, brancher caméra + modèle vision.",
 )
@@ -436,6 +635,24 @@ def vision_observe(prompt: str = "Que vois-tu ?", image_path: Optional[str] = No
         if path.exists():
             observation["description"] = "Image reçue. Le module vision réel devra analyser cette image avec Gemma vision ou un modèle local."
             observation["file_size_bytes"] = path.stat().st_size
+            if RAFIKI_VISION_ENABLED:
+                try:
+                    vision = _observe_image_with_lmstudio(prompt, path)
+                    observation.update(vision)
+                    observation["vision_enabled"] = True
+                except Exception as exc:
+                    observation["vision_enabled"] = True
+                    observation["vision_error"] = str(exc)
+                    observation["description"] = (
+                        "Image recue, mais l'analyse vision LM Studio a echoue. "
+                        "Verifie que le serveur LM Studio est actif et que le modele accepte les images."
+                    )
+            else:
+                observation["vision_enabled"] = False
+                observation["description"] = (
+                    "Image recue. Active RAFIKI_VISION_ENABLED=true et charge un modele vision "
+                    "dans LM Studio pour analyser reellement l'image."
+                )
         else:
             observation["description"] = "Aucun fichier image trouvé au chemin indiqué."
     else:

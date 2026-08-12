@@ -1,8 +1,0 @@
-{"action":"expression","name":"happy","text":"Bravo !","beep":true}
-{"action":"gesture","name":"greet","repeat":1}
-{"action":"gesture","name":"thinking","repeat":1}
-{"action":"gesture","name":"celebrate","repeat":1}
-{"action":"gesture","name":"alert","repeat":2}
-{"action":"pose","head":70,"left_arm":130,"right_arm":50}
-{"action":"screen_text","expression":"thinking","text":"Je reflechis..."}
-{"action":"demo"}

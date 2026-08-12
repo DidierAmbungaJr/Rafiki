@@ -1,152 +1,102 @@
-# Rafiki — Agent LLM central + orchestration MCP
+# Rafiki - Serveur cerveau PC
 
-Ce dossier contient un prototype complet pour tester l'orchestration Rafiki sur PC avant le passage sur Raspberry Pi.
+Ce dossier contient le serveur PC de Rafiki. Il garde le calcul lourd:
 
-## 1. Rôle de chaque fichier
+- agent central LangGraph;
+- LM Studio OpenAI-compatible avec `bonsai-27b`;
+- tools MCP systeme: memoire, profil enfant, parole placeholder, vision, activites educatives, journal parent;
+- API FastAPI appelee par l'app mobile et, plus tard, par l'orchestrateur Raspberry.
 
-| Fichier | Rôle |
+La simulation de test du corps a ete retiree. La Raspberry gerera le corps reel dans un chantier separe.
+
+## Fichiers principaux
+
+| Fichier | Role |
 |---|---|
-| `mcp_rafiki_systems_server.py` | Serveur MCP qui expose les systèmes Rafiki sous forme d'outils : mémoire, parole, vision, expressions, gestes, journal parent, activité éducative, fallback cloud. |
-| `rafiki_agent.py` | Agent central LangGraph + LM Studio. Il charge les outils MCP et décide lesquels appeler selon la demande. |
-| `test_rafiki_tools.py` | Test du serveur MCP sans LLM. À lancer en premier pour vérifier que les outils marchent. |
-| `test_rafiki_agent_prompts.txt` | Liste de prompts à utiliser pour tester l'agent. |
-| `requirements.txt` | Dépendances Python. |
-| `.env.example` | Configuration à copier en `.env`. |
+| `rafiki_app.py` | Serveur FastAPI expose au Wi-Fi local. |
+| `rafiki_agent.py` | Agent central LangGraph + LM Studio + tools MCP. |
+| `mcp_rafiki_systems_server.py` | Tools MCP locaux: memoire, vision, activites, journal, commandes generiques. |
+| `test_rafiki_tools.py` | Test des tools MCP sans LLM. |
+| `test_rafiki_educational_flow.py` | Test du flux pedagogique local. |
+| `docs/ARCHITECTURE_PC_RASPBERRY_LMSTUDIO.md` | Document de travail PC + mobile + Raspberry. |
+| `docs/PLAN_V1_MONOREPO.md` | Plan de reconciliation des branches serveur, Raspberry et entree mobile pour la V1. |
 
-## 2. Installation PC
-
-Dans le dossier du projet :
-
-```bash
-python -m venv .venv
-```
-
-### Windows PowerShell
+## Installation
 
 ```powershell
+cd rafiki_orchestrateur
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
 ```
 
-### Linux / Ubuntu / Raspberry Pi
+## Configuration LM Studio
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
+Dans LM Studio:
 
-## 3. Préparer LM Studio
+1. charge `bonsai-27b`;
+2. active le serveur OpenAI-compatible;
+3. verifie que l'URL est `http://127.0.0.1:1234/v1`.
 
-1. Ouvre LM Studio.
-2. Charge ton modèle `Gemma 3n 4B`.
-3. Active le serveur local OpenAI-compatible.
-4. Vérifie que l'URL est bien : `http://127.0.0.1:1234/v1`.
-5. Dans `.env`, adapte `LMSTUDIO_MODEL` si le nom affiché par LM Studio est différent.
-
-## 4. Test 1 — Vérifier MCP sans LLM
-
-```bash
-python test_rafiki_tools.py
-```
-
-Ce test doit afficher les outils disponibles puis finir par :
-
-```text
-✅ Tous les tests MCP locaux sont passés.
-```
-
-Tant que ce test ne passe pas, il ne faut pas encore tester l'agent LLM.
-
-## 5. Test 2 — Vérifier l'agent central avec LM Studio
-
-```bash
-python rafiki_agent.py
-```
-
-Puis teste par exemple :
-
-```text
-Bonjour Rafiki, présente-toi à un enfant de 7 ans.
-```
-
-Ou en mode une seule requête :
-
-```bash
-python rafiki_agent.py --once "Propose une activité de calcul et fais une expression de joie"
-```
-
-Pour voir les appels d'outils :
-
-```bash
-python rafiki_agent.py --debug
-```
-
-## 6. Passage futur sur Raspberry Pi
-
-Pour passer de la simulation au robot réel :
-
-1. Installer Mosquitto sur Raspberry Pi.
-2. Mettre dans `.env` :
+Variables importantes:
 
 ```env
-RAFIKI_MODE=raspberry
-RAFIKI_MQTT_ENABLED=true
-RAFIKI_MQTT_BROKER=localhost
+LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
+LMSTUDIO_API_KEY=lm_studio
+LMSTUDIO_MODEL=bonsai-27b
+
+RAFIKI_APP_HOST=0.0.0.0
+RAFIKI_APP_PORT=7860
+RAFIKI_APP_CORS_ORIGINS=*
 ```
 
-3. Adapter dans `mcp_rafiki_systems_server.py` :
-   - `speech_say()` pour appeler Piper réellement.
-   - `vision_observe()` pour appeler la caméra + modèle vision.
-   - `motor_gesture()` et `expression_set()` pour publier les commandes attendues par l'ESP32-S3.
+## Tests
 
-## 7. Topics MQTT proposés pour ESP32-S3
+Sans LLM:
 
-Commandes envoyées par Rafiki vers ESP32-S3 :
+```powershell
+python test_rafiki_tools.py
+python test_rafiki_educational_flow.py
+```
+
+Avec LM Studio:
+
+```powershell
+python rafiki_agent.py --once "Bonjour Rafiki, presente-toi a un enfant en deux phrases." --debug
+```
+
+Pour une vraie demo Bonsai sans routage local rapide:
+
+```powershell
+python rafiki_agent.py --once "Propose une petite activite sur la pluie pour un enfant de 7 ans." --force-llm --debug
+```
+
+Serveur HTTP:
+
+```powershell
+python rafiki_app.py
+```
+
+Puis depuis le meme Wi-Fi:
 
 ```text
-rafiki/esp32/commands
+http://IP_DU_PC:7860/api/health
 ```
 
-Format JSON :
+L'app mobile envoie le texte transcrit par Whisper a `POST /api/chat` et lit le champ `reply`.
+Pour forcer une vraie demo Bonsai via l'API, ajouter `"force_llm": true` au JSON de `/api/chat`.
 
-```json
-{
-  "source": "rafiki_mcp",
-  "action": "set_expression",
-  "params": {
-    "emotion": "joie",
-    "intensity": 0.8
-  },
-  "created_at": "..."
-}
-```
+## Scenario d'allumage
 
-Autres actions possibles :
-
-```json
-{
-  "action": "motor_gesture",
-  "params": {
-    "gesture": "saluer",
-    "speed": 0.5
-  }
-}
-```
-
-Statut envoyé par ESP32-S3 vers Rafiki :
+Chaque nouvelle conversation commence par l'accueil officiel de Rafiki:
 
 ```text
-rafiki/esp32/status
+Bonjour, je suis Rafiki. Je peux parler avec toi, t'aider à apprendre, faire de petites activités, garder quelques souvenirs utiles et regarder autour de moi quand ma caméra est branchée. Qu'est-ce que tu veux faire maintenant ?
 ```
 
-Exemple :
+En API, l'app peut lancer ce scenario avec:
 
-```json
-{
-  "battery": 82,
-  "motors": "ok",
-  "display": "ok"
-}
+```text
+POST /api/start
 ```

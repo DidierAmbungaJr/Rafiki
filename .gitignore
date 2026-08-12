@@ -11,3 +11,5 @@ venv/
 *.log
 *.tmp
 *.bak
+.tmp/
+rafiki_orchestrateur/runtime/

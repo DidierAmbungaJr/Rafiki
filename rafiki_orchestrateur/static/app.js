@@ -12,7 +12,6 @@ const lastSource = document.querySelector("#lastSource");
 const liveStatus = document.querySelector("#liveStatus");
 const profileBox = document.querySelector("#profileBox");
 const parentBox = document.querySelector("#parentBox");
-const liveBodyToggle = document.querySelector("#liveBodyToggle");
 const voiceRate = document.querySelector("#voiceRate");
 const voiceRateValue = document.querySelector("#voiceRateValue");
 const voicePitch = document.querySelector("#voicePitch");
@@ -89,14 +88,13 @@ async function sendMessage(message, inputMode = "text") {
       body: JSON.stringify({
         message: trimmed,
         input_mode: inputMode,
-        live_body: liveBodyToggle.checked,
       }),
     });
     pending.remove();
     const reply = cleanOutput(data.reply);
     addMessage("assistant", reply);
     lastSource.textContent = data.source || "llm";
-    liveStatus.textContent = liveBodyToggle.checked ? "live" : "calme";
+    liveStatus.textContent = "cerveau PC";
     runtimeState.textContent = data.source === "llm" ? "Reponse LLM" : "Action locale";
     speak(reply);
     refreshPanels();
@@ -110,25 +108,11 @@ async function sendMessage(message, inputMode = "text") {
   }
 }
 
-async function sendBodyFeedback(action, text = "") {
-  if (!liveBodyToggle.checked) return;
-  try {
-    await fetchJson("/api/body-feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, text }),
-    });
-  } catch {
-    bodyStatus.textContent = "feedback limite";
-  }
-}
-
 async function refreshStatus() {
   try {
     const data = await fetchJson("/api/status");
     llmStatus.textContent = data.systems?.status || "ok";
-    const body = data.body || {};
-    bodyStatus.textContent = body.status || (body.mqtt_connected ? "connecte" : "non detecte");
+    bodyStatus.textContent = "Raspberry a brancher";
     runtimeState.textContent = "Pret";
   } catch (error) {
     llmStatus.textContent = "indisponible";
@@ -290,9 +274,9 @@ speakToggle.addEventListener("click", () => {
 });
 
 resetBtn.addEventListener("click", async () => {
-  await fetchJson("/api/reset", { method: "POST" });
+  const data = await fetchJson("/api/reset", { method: "POST" });
   messagesEl.innerHTML = "";
-  addMessage("assistant", "Conversation remise a zero. Je suis pret.");
+  addMessage("assistant", cleanOutput(data.reply || "Bonjour, je suis Rafiki. Qu'est-ce que tu veux faire maintenant ?"));
   refreshPanels();
 });
 
@@ -304,11 +288,6 @@ voiceRate.addEventListener("input", () => {
 
 voicePitch.addEventListener("input", () => {
   voicePitchValue.textContent = Number(voicePitch.value).toFixed(2);
-});
-
-liveBodyToggle.addEventListener("change", () => {
-  liveStatus.textContent = liveBodyToggle.checked ? "live" : "calme";
-  sendBodyFeedback(liveBodyToggle.checked ? "neutral" : "neutral");
 });
 
 setupSpeechRecognition();

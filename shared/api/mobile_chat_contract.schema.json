@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rafiki.local/schemas/mobile_chat_contract.schema.json",
+  "title": "RafikiMobileChatRequest",
+  "type": "object",
+  "required": ["message"],
+  "additionalProperties": true,
+  "properties": {
+    "message": { "type": "string", "minLength": 1 },
+    "input_mode": { "type": "string", "default": "voice_mobile" },
+    "child_id": { "type": "string", "default": "default" },
+    "parent_id": { "type": "string", "default": "default_parent" },
+    "session_id": { "type": "string", "default": "default_session" },
+    "child_profile": { "type": "object" },
+    "parental_controls": { "type": "object" },
+    "force_llm": { "type": "boolean", "default": false }
+  }
+}

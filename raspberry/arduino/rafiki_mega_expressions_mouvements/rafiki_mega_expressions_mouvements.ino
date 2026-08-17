@@ -48,13 +48,13 @@ const uint8_t PIN_RL = 46;  // Pied gauche
 const uint8_t PIN_RR = 47;  // Pied droit
 
 const int BASE_ANGLE = 0;
-const int TRIM_YL = 80;
+const int TRIM_YL = 0;
 const int TRIM_YR = 0;
 const int TRIM_RL = 0;
 const int TRIM_RR = 0;
 
-const float SERVO_SPEED_LIMIT = 100.0f;
-const float SERVO_SMOOTHING_TIME = 0.15f;
+const float SERVO_SPEED_LIMIT = 45.0f;
+const float SERVO_SMOOTHING_TIME = 0.25f;
 
 Servo servoYL;
 Servo servoYR;
@@ -68,7 +68,12 @@ uint8_t activeServoTest = 0;
 int8_t activeBehavior = -1;
 unsigned long behaviorStartedAt = 0;
 
-float currentServoAngles[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+float currentServoAngles[4] = {
+  (float)BASE_ANGLE,
+  (float)BASE_ANGLE,
+  (float)BASE_ANGLE,
+  (float)BASE_ANGLE
+};
 unsigned long lastServoUpdateAt = 0;
 
 // Démonstration écran + servos
@@ -93,6 +98,7 @@ const unsigned long DEMO_EXPRESSION_INTERVAL_MS = 4000;
 
 const int16_t SCREEN_W = 480;
 const int16_t SCREEN_H = 320;
+const float EYE_SCALE = 1.6f;
 
 // Zones fixes : chaque redessin efface exactement ces surfaces.
 const int16_t LEFT_EYE_ZONE_X  = 72;
@@ -176,28 +182,35 @@ void clearFaceDynamicZones() {
 }
 
 void drawGlowDot(int16_t x, int16_t y, uint8_t radius, uint16_t color) {
-  tft.fillCircle(x, y, radius + 4, C_CARD);
-  tft.fillCircle(x, y, radius + 2, C_CYAN_SOFT);
-  tft.fillCircle(x, y, radius, color);
-  tft.fillCircle(x - radius / 3, y - radius / 3, max((int)2, (int)radius / 4), C_WHITE);
+  int16_t scaledRadius = max((int16_t)8, (int16_t)round(radius * EYE_SCALE));
+  tft.fillCircle(x, y, scaledRadius + 6, C_CARD);
+  tft.fillCircle(x, y, scaledRadius + 3, C_CYAN_SOFT);
+  tft.fillCircle(x, y, scaledRadius, color);
+  tft.fillCircle(x - scaledRadius / 3, y - scaledRadius / 3, max((int)3, (int)scaledRadius / 4), C_WHITE);
 }
 
 void drawVerticalEye(int16_t x, int16_t y, uint16_t color) {
-  tft.fillRoundRect(x - 10, y - 19, 20, 38, 10, C_CARD);
-  tft.fillRoundRect(x - 8, y - 17, 16, 34, 8, color);
-  tft.fillCircle(x - 3, y - 7, 3, C_WHITE);
+  int16_t eyeW = (int16_t)round(20.0f * EYE_SCALE);
+  int16_t eyeH = (int16_t)round(38.0f * EYE_SCALE);
+  int16_t pupilR = max((int16_t)3, (int16_t)round(3.0f * EYE_SCALE));
+
+  tft.fillRoundRect(x - eyeW / 2, y - eyeH / 2, eyeW, eyeH, 10, C_CARD);
+  tft.fillRoundRect(x - eyeW / 2 + 2, y - eyeH / 2 + 2, eyeW - 4, eyeH - 4, 8, color);
+  tft.fillCircle(x - 3, y - eyeH / 4, pupilR, C_WHITE);
 }
 
 void drawClosedEye(int16_t x, int16_t y, uint16_t color) {
-  thickLine(x - 25, y, x + 25, y, 5, color);
+  uint8_t lineThickness = max((uint8_t)6, (uint8_t)round(5.0f * EYE_SCALE));
+  thickLine((int16_t)round(x - 25.0f * EYE_SCALE), y, (int16_t)round(x + 25.0f * EYE_SCALE), y, lineThickness, color);
 }
 
 void drawHappyEye(int16_t x, int16_t y, uint16_t color) {
-  // Arc heureux construit avec deux cercles et un masque de fond.
-  tft.drawCircle(x, y + 14, 28, color);
-  tft.drawCircle(x, y + 15, 28, color);
-  tft.drawCircle(x, y + 16, 28, color);
-  tft.fillRect(x - 34, y - 20, 68, 33, C_BG);
+  int16_t arcRadius = (int16_t)round(28.0f * EYE_SCALE);
+  int16_t offsetY = (int16_t)round(14.0f * EYE_SCALE);
+  tft.drawCircle(x, y + offsetY, arcRadius, color);
+  tft.drawCircle(x, y + offsetY + 1, arcRadius, color);
+  tft.drawCircle(x, y + offsetY + 2, arcRadius, color);
+  tft.fillRect(x - arcRadius - 6, y - (int16_t)round(20.0f * EYE_SCALE), arcRadius * 2 + 12, (int16_t)round(33.0f * EYE_SCALE), C_BG);
 }
 
 void drawSadBrow(int16_t x, int16_t y, bool left, uint16_t color) {
@@ -528,10 +541,10 @@ void setServoTest(uint8_t testNumber) {
 
   Serial.print(F("SERVO: "));
   if (testNumber == 0) Serial.println(F("REPOS"));
-  else if (testNumber == 1) Serial.println(F("JAMBE GAUCHE YL - PIN 44"));
-  else if (testNumber == 2) Serial.println(F("JAMBE DROITE YR - PIN 45"));
-  else if (testNumber == 3) Serial.println(F("PIED GAUCHE RL - PIN 46"));
-  else if (testNumber == 4) Serial.println(F("PIED DROIT RR - PIN 47"));
+  else if (testNumber == 1) Serial.println(F("JAMBE GAUCHE"));
+  else if (testNumber == 2) Serial.println(F("JAMBE DROITE"));
+  else if (testNumber == 3) Serial.println(F("PIED GAUCHE"));
+  else if (testNumber == 4) Serial.println(F("PIED DROIT"));
   else Serial.println(F("SEQUENTIEL"));
 }
 
@@ -549,17 +562,21 @@ void calculateServoTargets(float targets[4]) {
     float medium = sin(t * 1.6f * PI); // période ~1,25 s
     float fast = sin(t * 2.4f * PI);   // période ~0,83 s
 
+    for (uint8_t i = 0; i < 4; i++) {
+      targets[i] = 0.0f;
+    }
+
     switch (activeBehavior) {
       case 0: // HEUREUX : petite danse alternée
-        targets[0] = 10.0f + 10.0f * medium;
-        targets[1] = 10.0f - 10.0f * medium;
-        targets[2] = 7.0f + 7.0f * medium;
-        targets[3] = 7.0f - 7.0f * medium;
+        targets[0] = 18.0f * medium;
+        targets[1] = -18.0f * medium;
+        targets[2] = 12.0f * medium;
+        targets[3] = -12.0f * medium;
         break;
 
       case 1: // CLIN D'OEIL : petit salut de la jambe gauche
-        targets[0] = 9.0f + 9.0f * slow;
-        targets[2] = 5.0f + 5.0f * slow;
+        targets[0] = 18.0f * slow;
+        targets[2] = 12.0f * slow;
         break;
 
       case 2: // TRISTE : balancement lent et faible
@@ -616,14 +633,14 @@ void calculateServoTargets(float targets[4]) {
     }
 
     for (uint8_t i = 0; i < 4; i++) {
-      targets[i] = constrain(targets[i], 0.0f, 24.0f);
+      targets[i] = constrain((float)BASE_ANGLE + targets[i], 0.0f, 180.0f);
     }
     return;
   }
 
   // Mode de test servo d'origine.
   float phase = (float)(now % 2000UL) / 2000.0f * 2.0f * PI;
-  float sweepOffset = 15.0f + 15.0f * sin(phase);
+  float sweepOffset = 30.0f * sin(phase);
 
   if (activeServoTest >= 1 && activeServoTest <= 4) {
     targets[activeServoTest - 1] = (float)BASE_ANGLE + sweepOffset;

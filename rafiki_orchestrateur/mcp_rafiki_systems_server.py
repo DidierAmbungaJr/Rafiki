@@ -50,6 +50,7 @@ logger = logging.getLogger("rafiki-mcp")
 
 mcp = FastMCP("Rafiki Systems MCP Server")
 
+BASE_DIR = Path(__file__).resolve().parent
 MODE = os.getenv("RAFIKI_MODE", "simulation").lower()
 DEFAULT_CHILD_ID = os.getenv("RAFIKI_CHILD_ID", "default")
 DB_PATH = Path(os.getenv("RAFIKI_DB_PATH", "./rafiki_memory.sqlite3")).expanduser()
@@ -69,6 +70,8 @@ LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "bonsai-27b")
 RAFIKI_VISION_ENABLED = os.getenv("RAFIKI_VISION_ENABLED", "false").lower() == "true"
 RAFIKI_VISION_MODEL = os.getenv("RAFIKI_VISION_MODEL", LMSTUDIO_MODEL)
 RAFIKI_VISION_TIMEOUT_SECONDS = int(os.getenv("RAFIKI_VISION_TIMEOUT_SECONDS", "90"))
+RAFIKI_VISION_URL = os.getenv("RAFIKI_VISION_URL", "http://localhost:8000").rstrip("/")
+BODY_STATUS_TTL_SECONDS = max(2, int(os.getenv("RAFIKI_BODY_STATUS_TTL_SECONDS", "15")))
 
 _RUNTIME_STATE: Dict[str, Any] = {
     "mode": MODE,
@@ -85,11 +88,98 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _body_connection_state() -> Dict[str, Any]:
+    """Retourne la disponibilité réelle du corps signalée par la Raspberry."""
+    # Les outils MCP peuvent être appelés dans des processus stdio distincts.
+    # Le statut du corps ne doit donc pas vivre uniquement dans _RUNTIME_STATE.
+    status = _read_body_runtime_status()
+    last_seen_at = str(status.get("updated_at") or "")
+    age_seconds: Optional[float] = None
+    if last_seen_at:
+        try:
+            seen_at = datetime.fromisoformat(last_seen_at.replace("Z", "+00:00"))
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - seen_at).total_seconds())
+        except ValueError:
+            last_seen_at = ""
+
+    reported_connected = status.get("connected") is True
+    connected = bool(
+        reported_connected
+        and age_seconds is not None
+        and age_seconds <= BODY_STATUS_TTL_SECONDS
+    )
+    if connected:
+        state = "connected"
+    elif status:
+        state = "stale" if reported_connected else "offline"
+    else:
+        state = "not_reported"
+
+    return {
+        "state": state,
+        "connected": connected,
+        "reported_connected": reported_connected,
+        "transport": status.get("transport", "http_pull"),
+        "controller": status.get("controller"),
+        "body_port": status.get("body_port"),
+        "last_seen_at": last_seen_at or None,
+        "seconds_since_last_seen": round(age_seconds, 1) if age_seconds is not None else None,
+        "ttl_seconds": BODY_STATUS_TTL_SECONDS,
+        "last_command_id": status.get("last_command_id"),
+        "last_action": status.get("last_action"),
+        "last_error": status.get("error"),
+        "queue_size": _body_queue_size(),
+    }
+
+
 def _connect_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
+
+
+def _read_body_runtime_status() -> Dict[str, Any]:
+    """Lit le dernier heartbeat persistant de la Raspberry.
+
+    Une valeur en mémoire reste en secours pour la compatibilité avec les appels
+    directs, mais SQLite est la source de vérité entre deux processus MCP.
+    """
+    with _connect_db() as con:
+        row = con.execute(
+            "SELECT status_json, updated_at FROM body_runtime_status WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        return dict(_RUNTIME_STATE.get("esp32_status") or {})
+    try:
+        status = json.loads(row["status_json"])
+    except (TypeError, json.JSONDecodeError):
+        logger.warning("Statut corps persistant illisible; statut ignore.")
+        return {}
+    if not isinstance(status, dict):
+        return {}
+    status["updated_at"] = row["updated_at"]
+    return status
+
+
+def _save_body_runtime_status(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Enregistre atomiquement le heartbeat, partage entre les processus MCP."""
+    saved_at = _now()
+    saved_status = {**status, "updated_at": saved_at}
+    with _connect_db() as con:
+        con.execute(
+            """
+            INSERT INTO body_runtime_status (id, status_json, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status_json = excluded.status_json,
+                updated_at = excluded.updated_at
+            """,
+            (json.dumps(saved_status, ensure_ascii=False), saved_at),
+        )
+        con.commit()
+    _RUNTIME_STATE["esp32_status"] = saved_status
+    return saved_status
 
 
 def _init_db() -> None:
@@ -141,29 +231,15 @@ def _init_db() -> None:
             )
             """
         )
-        existing = con.execute(
-            "SELECT child_id FROM child_profiles WHERE child_id = ?", (DEFAULT_CHILD_ID,)
-        ).fetchone()
-        if not existing:
-            con.execute(
-                """
-                INSERT INTO child_profiles
-                (child_id, name, age, language, interests_json, level, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    DEFAULT_CHILD_ID,
-                    "enfant",
-                    7,
-                    "français simple",
-                    json.dumps(["histoires", "jeux", "apprentissage"], ensure_ascii=False),
-                    "débutant",
-                    _now(),
-                ),
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS body_runtime_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
-        con.commit()
-
-
+            """
+        )
 _init_db()
 
 
@@ -193,7 +269,9 @@ def _mqtt_connect_if_needed() -> None:
             payload = json.loads(msg.payload.decode("utf-8"))
         except Exception:
             payload = {"raw": msg.payload.decode("utf-8", errors="replace")}
-        _RUNTIME_STATE["esp32_status"] = payload
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+        _save_body_runtime_status(payload)
         logger.info("Statut ESP32 reçu: %s", payload)
 
     try:
@@ -225,7 +303,13 @@ def _publish_command(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
             return {"transport": "mqtt", "topic": MQTT_TOPIC_COMMANDS, "command": command}
         except Exception as exc:
             logger.warning("Publication MQTT impossible: %s", exc)
-    return {"transport": "simulation", "topic": None, "command": command}
+    body = _body_connection_state()
+    return {
+        "transport": "http_pull" if body["connected"] else "http_pull_queued",
+        "topic": None,
+        "command": command,
+        "body_state": body["state"],
+    }
 
 
 def _enqueue_body_command(command: Dict[str, Any]) -> None:
@@ -294,6 +378,8 @@ def _observe_image_with_lmstudio(prompt: str, image_path: Path) -> Dict[str, Any
     payload = {
         "model": RAFIKI_VISION_MODEL,
         "temperature": 0.2,
+        "max_tokens": 600,
+        "reasoning_effort": "none",
         "messages": [
             {
                 "role": "system",
@@ -312,12 +398,10 @@ def _observe_image_with_lmstudio(prompt: str, image_path: Path) -> Dict[str, Any
         ],
     }
     response = _lmstudio_chat(payload, timeout_seconds=RAFIKI_VISION_TIMEOUT_SECONDS)
-    description = (
-        response.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
+    msg = response.get("choices", [{}])[0].get("message", {})
+    description = (msg.get("content") or "").strip()
+    if not description and msg.get("reasoning_content"):
+        description = msg.get("reasoning_content", "").strip()
     if not description:
         description = "Image recue, mais le modele vision n'a pas produit de description."
     return {
@@ -341,6 +425,7 @@ def rafiki_status() -> Dict[str, Any]:
     with _connect_db() as con:
         memory_count = con.execute("SELECT COUNT(*) AS n FROM memory").fetchone()["n"]
         event_count = con.execute("SELECT COUNT(*) AS n FROM parent_events").fetchone()["n"]
+    body = _body_connection_state()
     return {
         "status": "ok",
         "mode": MODE,
@@ -353,7 +438,8 @@ def rafiki_status() -> Dict[str, Any]:
         "last_expression": _RUNTIME_STATE["last_expression"],
         "last_gesture": _RUNTIME_STATE["last_gesture"],
         "last_spoken_text": _RUNTIME_STATE["last_spoken_text"],
-        "esp32_status": _RUNTIME_STATE["esp32_status"],
+        "esp32_status": _read_body_runtime_status(),
+        "body": body,
         "started_at": _RUNTIME_STATE["started_at"],
         "checked_at": _now(),
     }
@@ -410,18 +496,60 @@ def body_command_peek(limit: int = 10) -> Dict[str, Any]:
 
 
 @mcp.tool(
+    name="body_command_enqueue",
+    description=(
+        "Ajoute une commande brute a la file HTTP de la Raspberry: "
+        "set_expression, motor_gesture, screen_text ou status_ping."
+    ),
+)
+def body_command_enqueue(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Compatibilite avec POST /api/body/enqueue du pont Raspberry de reference."""
+    action = str(action or "").strip()
+    allowed = {"set_expression", "motor_gesture", "screen_text", "status_ping"}
+    if action not in allowed:
+        return {
+            "status": "error",
+            "message": f"Action corps inconnue: {action}",
+            "allowed": sorted(allowed),
+        }
+
+    command_params = dict(params) if isinstance(params, dict) else {}
+    if action == "set_expression":
+        emotion = str(command_params.get("emotion", "neutre")).strip()
+        command_params["emotion"] = emotion or "neutre"
+    elif action == "motor_gesture":
+        gesture = str(command_params.get("gesture", "stop")).strip()
+        command_params["gesture"] = gesture or "stop"
+    elif action == "screen_text":
+        text = " ".join(str(command_params.get("text", "")).split())[:160]
+        if not text:
+            return {"status": "error", "message": "Le texte ecran est vide."}
+        command_params["text"] = text
+    else:
+        command_params = {}
+
+    transport = _publish_command(action, command_params)
+    return {
+        "status": "success",
+        "action": action,
+        "params": command_params,
+        "command_id": transport["command"]["id"],
+        "queue_size": _body_queue_size(),
+        "transport": transport,
+    }
+
+
+@mcp.tool(
     name="body_status_update",
     description="Met a jour le dernier statut connu de la Raspberry ou du controleur Arduino.",
 )
 def body_status_update(status: Dict[str, Any]) -> Dict[str, Any]:
-    _RUNTIME_STATE["esp32_status"] = {
-        **_RUNTIME_STATE.get("esp32_status", {}),
-        **status,
-        "updated_at": _now(),
-    }
+    previous = _read_body_runtime_status()
+    saved_status = _save_body_runtime_status({**previous, **status})
     return {
         "status": "ok",
-        "body_status": _RUNTIME_STATE["esp32_status"],
+        "body_status": saved_status,
+        "body": _body_connection_state(),
     }
 
 
@@ -595,14 +723,31 @@ def expression_set(emotion: str, intensity: float = 0.7) -> Dict[str, Any]:
     name="motor_gesture",
     description="Déclenche un geste sur l'ESP32-S3: saluer, hocher_tete, tourner_gauche, tourner_droite, danser, stop.",
 )
-def motor_gesture(gesture: str, speed: float = 0.5) -> Dict[str, Any]:
+def motor_gesture(gesture: str, speed: float = 0.5, duration_ms: int = 900) -> Dict[str, Any]:
     allowed = {"saluer", "hocher_tete", "tourner_gauche", "tourner_droite", "danser", "stop"}
     gesture = gesture.lower().strip()
     if gesture not in allowed:
         return {"status": "error", "message": f"Geste inconnu: {gesture}", "allowed": sorted(allowed)}
     speed = max(0.0, min(float(speed), 1.0))
-    _RUNTIME_STATE["last_gesture"] = {"gesture": gesture, "speed": speed, "at": _now()}
-    transport = _publish_command("motor_gesture", {"gesture": gesture, "speed": speed})
+    default_durations = {
+        "saluer": 900,
+        "hocher_tete": 650,
+        "tourner_gauche": 700,
+        "tourner_droite": 700,
+        "danser": 1500,
+        "stop": 0,
+    }
+    duration_ms = max(0, min(int(duration_ms or default_durations.get(gesture, 900)), 3000))
+    _RUNTIME_STATE["last_gesture"] = {
+        "gesture": gesture,
+        "speed": speed,
+        "duration_ms": duration_ms,
+        "at": _now(),
+    }
+    transport = _publish_command(
+        "motor_gesture",
+        {"gesture": gesture, "speed": speed, "duration_ms": duration_ms},
+    )
     return {"status": "success", "gesture": _RUNTIME_STATE["last_gesture"], "transport": transport}
 
 
@@ -618,9 +763,24 @@ def screen_text(text: str) -> Dict[str, Any]:
     return {"status": "success", "text": text, "transport": transport}
 
 
+def _resolve_vision_url() -> Optional[str]:
+    state_file = BASE_DIR / "runtime" / "vision_state.json"
+    if state_file.exists():
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            url = data.get("vision_url")
+            if url:
+                return str(url).rstrip("/")
+        except Exception:
+            pass
+    if RAFIKI_VISION_URL:
+        return RAFIKI_VISION_URL
+    return None
+
+
 @mcp.tool(
     name="vision_observe",
-    description="Observe l'environnement. En simulation, renvoie une description fictive; sur Raspberry, brancher caméra + modèle vision.",
+    description="Observe l'environnement avec la caméra Raspberry Pi et LM Studio vision.",
 )
 def vision_observe(prompt: str = "Que vois-tu ?", image_path: Optional[str] = None) -> Dict[str, Any]:
     observation: Dict[str, Any] = {
@@ -628,36 +788,76 @@ def vision_observe(prompt: str = "Que vois-tu ?", image_path: Optional[str] = No
         "prompt": prompt,
         "created_at": _now(),
     }
+    target_path: Optional[Path] = None
+    default_candidate = BASE_DIR / "runtime" / "vision_uploads" / "latest_frame.jpg"
+
     if image_path:
-        path = Path(image_path).expanduser()
-        observation["image_path"] = str(path)
-        observation["image_exists"] = path.exists()
-        if path.exists():
-            observation["description"] = "Image reçue. Le module vision réel devra analyser cette image avec Gemma vision ou un modèle local."
-            observation["file_size_bytes"] = path.stat().st_size
-            if RAFIKI_VISION_ENABLED:
+        target_path = Path(image_path).expanduser()
+    else:
+        # Essayer de récupérer une frame fraîche en direct depuis la caméra Raspberry Pi
+        vision_url = _resolve_vision_url()
+        if vision_url:
+            for ep in ["/capture", "/capture/json", "/snapshot"]:
                 try:
-                    vision = _observe_image_with_lmstudio(prompt, path)
-                    observation.update(vision)
-                    observation["vision_enabled"] = True
-                except Exception as exc:
-                    observation["vision_enabled"] = True
-                    observation["vision_error"] = str(exc)
-                    observation["description"] = (
-                        "Image recue, mais l'analyse vision LM Studio a echoue. "
-                        "Verifie que le serveur LM Studio est actif et que le modele accepte les images."
+                    req = urllib.request.Request(
+                        f"{vision_url}{ep}",
+                        headers={"Accept": "image/jpeg, application/json, */*", "User-Agent": "RafikiMCP"},
                     )
-            else:
-                observation["vision_enabled"] = False
+                    with urllib.request.urlopen(req, timeout=3.0) as resp:
+                        content_type = resp.headers.get_content_type()
+                        data = resp.read()
+                        if content_type == "application/json" or b'"image_base64"' in data:
+                            parsed = json.loads(data.decode("utf-8"))
+                            raw_b64 = parsed.get("image_base64") or parsed.get("data_uri")
+                            if raw_b64:
+                                clean_b64 = str(raw_b64).split(",")[-1].strip()
+                                binary = base64.b64decode(clean_b64)
+                                default_candidate.parent.mkdir(parents=True, exist_ok=True)
+                                default_candidate.write_bytes(binary)
+                                target_path = default_candidate
+                                break
+                        elif len(data) > 500:
+                            default_candidate.parent.mkdir(parents=True, exist_ok=True)
+                            default_candidate.write_bytes(data)
+                            target_path = default_candidate
+                            break
+                except Exception:
+                    pass
+
+        if target_path is None and default_candidate.exists():
+            target_path = default_candidate
+
+    if target_path and target_path.exists():
+        path = target_path
+        observation["image_path"] = str(path)
+        observation["image_exists"] = True
+        observation["file_size_bytes"] = path.stat().st_size
+        if RAFIKI_VISION_ENABLED:
+            try:
+                vision = _observe_image_with_lmstudio(prompt, path)
+                observation.update(vision)
+                observation["vision_enabled"] = True
+            except Exception as exc:
+                observation["vision_enabled"] = True
+                observation["vision_error"] = str(exc)
                 observation["description"] = (
-                    "Image recue. Active RAFIKI_VISION_ENABLED=true et charge un modele vision "
-                    "dans LM Studio pour analyser reellement l'image."
+                    "Image reçue, mais l'analyse vision LM Studio a échoué. "
+                    "Vérifie que le serveur LM Studio est actif et que le modèle accepte les images."
                 )
         else:
-            observation["description"] = "Aucun fichier image trouvé au chemin indiqué."
+            observation["vision_enabled"] = False
+            observation["description"] = (
+                "Image reçue. Active RAFIKI_VISION_ENABLED=true et charge un modèle vision "
+                "dans LM Studio pour analyser réellement l'image."
+            )
     else:
-        observation["description"] = "Simulation: Rafiki voit un enfant devant lui dans un environnement calme."
-        observation["objects"] = ["enfant", "table", "cahier"]
+        observation["camera_connected"] = False
+        observation["description"] = (
+            "La caméra de Rafiki n'est pas branchée ou n'a pas transmis d'image. "
+            "Je ne peux rien observer visuellement pour l'instant. "
+            "Peux-tu me décrire ce que tu as ou ce que tu souhaites me montrer ?"
+        )
+        observation["objects"] = []
     _RUNTIME_STATE["last_vision"] = observation
     return {"status": "success", "observation": observation}
 

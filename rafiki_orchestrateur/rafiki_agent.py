@@ -539,14 +539,72 @@ def normalize_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def parse_text_tool_call(content: Any, available_tools: set[str]) -> Optional[Dict[str, Any]]:
-    """Accepte les appels d'outils écrits en texte par certains modèles locaux."""
-    text = strip_code_fence(str(content or ""))
-    if not text:
-        return None
+def parse_text_tool_calls(content: Any, available_tools: set[str]) -> List[Dict[str, Any]]:
+    """Accepte les appels d'outils écrits en texte par certains modèles locaux (Python AST ou XML-like)."""
+    text = str(content or "")
+    if not text.strip():
+        return []
 
-    candidates = [text]
-    fenced = re.findall(r"```(?:python)?\s*(.*?)\s*```", str(content or ""), flags=re.DOTALL | re.IGNORECASE)
+    calls = []
+
+    # 1. Essai de parsing du format XML/Tag : <toolcall <function=name <parameter=key value</parameter </function </toolcall
+    # On cherche tous les blocs <toolcall ... </toolcall
+    xml_pattern = r"<toolcall\s*<function=(\w+)\s*(.*?)</toolcall"
+    xml_matches = re.findall(xml_pattern, text, flags=re.DOTALL | re.IGNORECASE)
+    
+    if xml_matches:
+        for raw_name, body in xml_matches:
+            # Normalisation du nom de l'outil (gestion des underscores manquants)
+            tool_name = raw_name.lower()
+            if tool_name not in available_tools:
+                for possible in [
+                    tool_name,
+                    tool_name.replace("set", "_set"),
+                    tool_name.replace("gesture", "_gesture"),
+                    tool_name.replace("text", "_text"),
+                    tool_name.replace("observe", "_observe"),
+                    tool_name.replace("expression", "expression_"),
+                    tool_name.replace("motor", "motor_"),
+                    tool_name.replace("screen", "screen_"),
+                    tool_name.replace("vision", "vision_"),
+                ]:
+                    if possible in available_tools:
+                        tool_name = possible
+                        break
+            
+            if tool_name in available_tools:
+                # Extraction des paramètres
+                args: Dict[str, Any] = {}
+                param_matches = re.findall(r"<parameter=(\w+)\s+([^<]+?)</parameter", body, flags=re.IGNORECASE)
+                for pk, pv in param_matches:
+                    val = pv.strip()
+                    if val.lower() == "true":
+                        typed_val = True
+                    elif val.lower() == "false":
+                        typed_val = False
+                    else:
+                        try:
+                            if "." in val:
+                                typed_val = float(val)
+                            else:
+                                typed_val = int(val)
+                        except ValueError:
+                            typed_val = val
+                    args[pk] = typed_val
+                
+                calls.append({
+                    "id": f"text_tool_{tool_name}_{abs(hash(body))}",
+                    "name": tool_name,
+                    "args": normalize_tool_args(tool_name, args),
+                    "synthetic": True,
+                })
+        
+        if calls:
+            return calls
+
+    # 2. Sinon, essai de parsing du format Python classique (ex: expressionset(emotion="joie"))
+    candidates = [strip_code_fence(text)]
+    fenced = re.findall(r"```(?:python)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     candidates.extend(item.strip() for item in fenced if item.strip())
 
     for candidate in candidates:
@@ -560,11 +618,28 @@ def parse_text_tool_call(content: Any, available_tools: set[str]) -> Optional[Di
         call = tree.body[0].value
         if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
             continue
-        tool_name = call.func.id
+        raw_name = call.func.id
+        tool_name = raw_name.lower()
+        if tool_name not in available_tools:
+            for possible in [
+                tool_name,
+                tool_name.replace("set", "_set"),
+                tool_name.replace("gesture", "_gesture"),
+                tool_name.replace("text", "_text"),
+                tool_name.replace("observe", "_observe"),
+                tool_name.replace("expression", "expression_"),
+                tool_name.replace("motor", "motor_"),
+                tool_name.replace("screen", "screen_"),
+                tool_name.replace("vision", "vision_"),
+            ]:
+                if possible in available_tools:
+                    tool_name = possible
+                    break
+        
         if tool_name not in available_tools:
             continue
 
-        args: Dict[str, Any] = {}
+        args = {}
         positional_names = POSITIONAL_TOOL_ARGS.get(tool_name, [])
         try:
             for index, arg_node in enumerate(call.args):
@@ -578,13 +653,20 @@ def parse_text_tool_call(content: Any, available_tools: set[str]) -> Optional[Di
         except Exception:
             continue
 
-        return {
+        calls.append({
             "id": f"text_tool_{tool_name}_{abs(hash(candidate))}",
             "name": tool_name,
             "args": normalize_tool_args(tool_name, args),
             "synthetic": True,
-        }
-    return None
+        })
+        break
+
+    return calls
+
+
+def parse_text_tool_call(content: Any, available_tools: set[str]) -> Optional[Dict[str, Any]]:
+    calls = parse_text_tool_calls(content, available_tools)
+    return calls[0] if calls else None
 
 
 def last_non_empty_ai_content(messages: List[BaseMessage]) -> str:
@@ -706,9 +788,9 @@ async def build_agent(verbose: bool = True):
         tool_calls = getattr(last_message, "tool_calls", []) or []
         synthetic_mode = False
         if not tool_calls:
-            parsed_call = parse_text_tool_call(getattr(last_message, "content", ""), set(tools_by_name.keys()))
-            if parsed_call:
-                tool_calls = [parsed_call]
+            parsed_calls = parse_text_tool_calls(getattr(last_message, "content", ""), set(tools_by_name.keys()))
+            if parsed_calls:
+                tool_calls = parsed_calls
                 synthetic_mode = True
 
         results: List[ToolMessage] = []
@@ -841,6 +923,7 @@ class RafikiConversationSession:
         max_history_messages: int = 24,
         debug: bool = False,
         force_llm: bool = FORCE_LLM,
+        child_id: str = "default",
     ) -> None:
         self.agent = agent
         self.tools_by_name = tools_by_name
@@ -848,7 +931,8 @@ class RafikiConversationSession:
         self.debug = debug
         self.force_llm = force_llm
         self.history: List[BaseMessage] = []
-        self.session_state: Dict[str, Any] = {}
+        self.session_state: Dict[str, Any] = {"child_id": child_id}
+        self.child_id = child_id
 
     @classmethod
     async def create(
@@ -857,9 +941,14 @@ class RafikiConversationSession:
         verbose: bool = False,
         debug: bool = False,
         force_llm: bool = FORCE_LLM,
+        child_id: str = "default",
     ) -> "RafikiConversationSession":
         agent, tools_by_name = await build_agent(verbose=verbose)
-        return cls(agent, tools_by_name, debug=debug, force_llm=force_llm)
+        return cls(agent, tools_by_name, debug=debug, force_llm=force_llm, child_id=child_id)
+
+    def bind_child(self, child_id: str) -> None:
+        self.child_id = child_id
+        self.session_state["child_id"] = child_id
 
     def reset(self) -> None:
         self.history.clear()

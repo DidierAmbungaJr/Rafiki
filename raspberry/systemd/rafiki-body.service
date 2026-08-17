@@ -1,0 +1,18 @@
+[Unit]
+Description=Rafiki Raspberry Pi Arduino body HTTP pull client
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Le depot doit etre clone dans ~/Rafiki. Adapter ces deux chemins sinon.
+WorkingDirectory=%h/Rafiki
+EnvironmentFile=%h/.config/rafiki/rafiki.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=%h/Rafiki
+ExecStart=%h/Rafiki/.venv/bin/python -m raspberry.app.body_pull_client --brain-url ${RAFIKI_BRAIN_URL} --body-port ${RAFIKI_BODY_PORT} --baudrate ${RAFIKI_BAUDRATE} --session-id ${RAFIKI_SESSION_ID}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

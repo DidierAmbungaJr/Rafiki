@@ -29,7 +29,7 @@ let manualStop = false;
 function cleanOutput(text) {
   return String(text || "")
     .replace(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}]/gu, "")
-    .replace(/\[[^\]]*(TOOL|JSON|MCP)[^\]]*\]/gi, "")
+    .replace(/\[[^\]\n]{1,80}\]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -112,7 +112,16 @@ async function refreshStatus() {
   try {
     const data = await fetchJson("/api/status");
     llmStatus.textContent = data.systems?.status || "ok";
-    bodyStatus.textContent = "Raspberry a brancher";
+    const body = data.systems?.body || {};
+    if (body.connected) {
+      bodyStatus.textContent = `Connecte${body.body_port ? ` (${body.body_port})` : ""}`;
+    } else if (body.state === "stale") {
+      bodyStatus.textContent = "Signal Raspberry ancien";
+    } else if (body.state === "offline") {
+      bodyStatus.textContent = "Raspberry hors ligne";
+    } else {
+      bodyStatus.textContent = "En attente de la Raspberry";
+    }
     runtimeState.textContent = "Pret";
   } catch (error) {
     llmStatus.textContent = "indisponible";
